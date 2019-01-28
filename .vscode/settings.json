@@ -1,7 +1,0 @@
-{
-  "python.pythonPath": "/Users/hongee/envs/pyaml-BjFXMA5o/bin/python",
-  "python.linting.mypyEnabled": false,
-  "python.linting.pylintEnabled": true,
-  "python.linting.enabled": true,
-  "python.unitTest.unittestEnabled": true
-}
