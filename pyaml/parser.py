@@ -1,13 +1,7 @@
-import re
 from collections import namedtuple
 from typing import Any, List, NamedTuple
 
-from lark import Lark, Tree
-
-from .grammar import grammar
 from .utils import squash_prefix
-
-_lark_parser: Lark = Lark(grammar)  # Earley parser
 
 
 class Parser(object):
@@ -34,7 +28,7 @@ class Parser(object):
         self._reset()
         super().__init__(*args, **kwargs)
 
-    ### Helper Functions
+    # Helper Functions
 
     def _reset(self):
         self._depth = list()
@@ -66,7 +60,7 @@ class Parser(object):
                     ref = ref.get(level)
                 if isinstance(scope, self.FreeformList):
                     in_freeform = True
-        assert ref != None
+        assert ref is not None
         return ref
 
     def _access_or_create(self, key: str, thing):
@@ -117,86 +111,88 @@ class Parser(object):
     def _is_freeform_array(self) -> bool:
         return len(self._depth) > 0 and isinstance(self._depth[-1], self.FreeformList)
 
-    ### Handlers
+    # Handlers
 
-    def _handle_list_item(self, elements):
-        value = filter(lambda t: isinstance(t, Tree), elements)
-        value_ = "".join(list(value)[0].children)
-        rest = "".join(elements[:-1])
+    def _handle_list_item(self, line):
+        value = line.lstrip()[1:].lstrip()
+        value_whitespace = value[len(value.rstrip()):]
+        value = value.rstrip()
+
         if self._is_array_type():
             if isinstance(self._depth[-1], self.SomeList):
                 self._clear_buffer()
                 old_list = self._depth.pop()
                 self._depth.append(self.StringList(old_list.id))
-                ref = self._append_string_value(value_.strip())
+                ref = self._append_string_value(value)
                 self._last_ref = ref
                 self._last_key = 0
-                self._buffer += value_
+                self._buffer += value
+                self._handle_comment(value_whitespace)
 
             elif isinstance(self._depth[-1], self.StringList):
                 self._clear_buffer()
-                ref = self._append_string_value(value_.strip())
+                ref = self._append_string_value(value)
                 self._last_ref = ref
                 self._last_key = len(ref) - 1
-                self._buffer += value_
+                self._buffer += value
+                self._handle_comment(value_whitespace)
             else:
-                self._handle_comment(rest + value_)
+                self._handle_comment(line)
         else:
-            self._handle_comment(rest + value_)
+            self._handle_comment(line)
 
-    def _handle_pair(self, elements):
-        important_values = list(filter(lambda t: isinstance(t, Tree), elements))
-        key_ = important_values[0].children[0].value
-        value_ = "".join(important_values[1].children)
-        key_layers = key_.split(".")
+    def _handle_pair(self, line):
+        key = line.split(":")[0]
+        value = ':'.join(line.split(":")[1:]).lstrip()
+        key = key.strip()
+        value_whitespace = value[len(value.rstrip()):]
+        value = value.rstrip()
+        key_layers = key.split(".")
 
         if len(self._depth) == 0 or isinstance(self._depth[-1], self.Namespace):
             self._clear_buffer()
-            ref = self._set_value(key_layers, value_.strip())
+            ref = self._set_value(key_layers, value)
             self._last_ref = ref
             self._last_key = key_layers[-1]
-            self._buffer += value_
+            self._buffer += value
+            self._handle_comment(value_whitespace)
         else:
             list_context = self._depth[-1]
             ref = None
             if isinstance(list_context, self.SomeList):
                 self._clear_buffer()
                 self._depth.pop()
-                self._depth.append(self.ObjectList(list_context.id, key_))
-                ref = self._set_value(key_layers, value_.strip())
+                self._depth.append(self.ObjectList(list_context.id, key))
+                ref = self._set_value(key_layers, value)
+                self._handle_comment(value_whitespace)
             elif isinstance(list_context, self.ObjectList):
                 self._clear_buffer()
-                if list_context.first_key == key_:
+                if list_context.first_key == key:
                     self._get_current_ref().append(dict())
-                ref = self._set_value(key_layers, value_.strip())
+                ref = self._set_value(key_layers, value)
+                self._handle_comment(value_whitespace)
             elif isinstance(list_context, self.FreeformList):
                 self._clear_buffer()
-                self._append_freeform_value(value_.strip(), key_)
+                self._append_freeform_value(value, key)
+                self._handle_comment(value_whitespace)
             elif isinstance(list_context, self.StringList):
                 # Flush to buffer
-                self._handle_comment(
-                    "".join(
-                        [
-                            "".join(t.children) if isinstance(t, Tree) else t
-                            for t in elements
-                        ]
-                    )
-                )
+                self._handle_comment(line)
 
             if isinstance(ref, dict):
                 # Rule of thumb - if this ref returns a dict, this can be multiline
                 self._last_ref = ref
                 self._last_key = key_layers[-1]
-                self._buffer += value_
+                self._buffer += value + value_whitespace
             # raise NotImplementedError()
 
-    def _handle_end_multiline(self, _):
+    def _handle_end_multiline(self):
         if self._last_ref is not None and self._last_key is not None:
             self._last_ref[self._last_key] = self._buffer.strip()
             self._clear_buffer()
 
-    def _handle_start_block(self, command):
-        key = command.children[0].value
+    def _handle_start_block(self, line):
+        key = line.split("}")[0][1:].strip()
         # squash all prefixing "."s
         key = squash_prefix(".", key)
         key_list = key.split(".")
@@ -214,15 +210,15 @@ class Parser(object):
             self._set_value(key_list, dict(), replace=False)
             self._depth.append(self.Namespace(key))
 
-    def _handle_end_block(self, command):
+    def _handle_end_block(self):
         if not self._depth:
             pass
         else:
             self._depth.pop()
 
-    def _handle_start_array(self, command):
-        is_freeform = "+" in command.children[0]
-        key = command.children[0]
+    def _handle_start_array(self, line):
+        key = line.split("]")[0][1:].strip()
+        is_freeform = "+" in key
         if is_freeform:
             key = key.replace("+", "", 1)
 
@@ -268,23 +264,21 @@ class Parser(object):
             else:
                 self._depth.append(self.SomeList(key))
 
-    def _handle_end_array(self, command):
+    def _handle_end_array(self):
         if self._is_array_type():
             self._depth.pop()
 
-    def _handle_skip(self, command):
+    def _handle_skip(self):
         self._skip = True
         self._clear_buffer()
 
-    def _handle_end_skip(self, command):
+    def _handle_end_skip(self):
         self._skip = False
 
     def _handle_comment(self, comment):
         comment_value = ""
         if isinstance(comment, str):
             comment_value = comment
-        else:
-            comment_value = "".join(comment.children)
 
         stripped_comment_value = comment_value.strip()
 
@@ -297,7 +291,7 @@ class Parser(object):
         else:
             self._buffer += comment_value
 
-    def _handle_ignore(self, _):
+    def _handle_ignore(self):
         return "Done"
 
     def _handle_command(self, command):
@@ -316,31 +310,55 @@ class Parser(object):
         if not self._skip or command.data == "end_skip":
             return fn(command)
 
-    def tree_to_dict(self, node: Tree) -> dict:
-        assert node.data == "start"
+    def get_dict(self, document) -> dict:
         self._reset()
-        for stmt in node.children:
-            stmt_ = stmt.children[0]
-            if stmt_.data == "pair":
-                if not self._skip:
-                    self._handle_pair(stmt_.children)
-            elif stmt_.data == "command":
-                rv = self._handle_command(stmt_.children[0])
-                if rv == "Done":
+        specials = ['[', ']', '\\', '{', '}']
+        for line in document.split("\n"):
+            line += "\n"
+            stripped = line.strip()
+            lstripped = line.lstrip()
+            if stripped.lower().startswith(":endskip"):
+                self._handle_end_skip()
+            elif not self._skip:
+                if stripped.lower().startswith(":end"):
+                    self._handle_end_multiline()
+                    # self._handle_end_block()
+                elif stripped.lower().startswith(":skip"):
+                    self._handle_skip()
+                elif stripped.lower().startswith(":ignore"):
+                    self._handle_ignore()
                     break
-            elif stmt_.data == "comment":
-                if not self._skip:
-                    self._handle_comment(stmt_)
-            elif stmt_.data == "list_item":
-                if not self._skip:
-                    self._handle_list_item(stmt_.children)
-            else:
-                raise NotImplementedError(stmt_.data)
+                elif stripped and stripped.startswith("*"):
+                    self._handle_list_item(line)
+                elif stripped and len(line.split(":")) >= 2:
+                    # Is possible key pair
+                    key = line.split(":")[0]
+                    if key and " " not in key.strip() and all([s not in key for s in specials]):
+                        self._handle_pair(line)
+                    else:
+                        self._handle_comment(line)
+                elif stripped and stripped[0] == '{' and '}' in stripped:
+                    command = stripped.split("}")[0][1:].strip()
+                    if not command:
+                        self._handle_end_block()
+                    elif all([s not in command for s in specials]):
+                        self._handle_start_block(lstripped)
+                    else:
+                        self._handle_comment(lstripped)
+                elif stripped and stripped[0] == '[' and ']' in stripped:
+                    command = stripped.split("]")[0][1:].strip()
+                    if not command:
+                        self._handle_end_array()
+                    elif all([s not in command for s in specials]):
+                        self._handle_start_array(lstripped)
+                    else:
+                        self._handle_comment(line)
+                else:
+                    self._handle_comment(line)
         return self._val
 
     def parse(self, input_to_parse) -> dict:
         if isinstance(input_to_parse, str):
-            tree = _lark_parser.parse(input_to_parse + "\n")
-            return self.tree_to_dict(tree)
+            return self.get_dict(input_to_parse)
         else:
             raise NotImplementedError("The parser currently only supports strings!")
